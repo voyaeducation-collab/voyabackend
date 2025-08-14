@@ -1,62 +1,51 @@
 # app/main.py
 
-from __future__ import annotations
-
-import os
 from typing import Optional
+import os
 
 from fastapi import FastAPI, Form, File, UploadFile, Header, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-# ---------- env & clients ----------
-VOYA_API_KEY = os.environ.get("VOYA_API_KEY", "")
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
-OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-5-turbo")
+# -------- env & config --------
+VOYA_API_KEY: str = os.environ.get("VOYA_API_KEY", "")
+OPENAI_API_KEY: str = os.environ.get("OPENAI_API_KEY", "")
+OPENAI_MODEL: str = os.environ.get("OPENAI_MODEL", "gpt-5-turbo")
 
-# OpenAI official SDK (no proxies arg)
-try:
-    from openai import OpenAI  # pip install openai==1.40.0
-    oai_client = OpenAI(api_key=OPENAI_API_KEY)
-except Exception as e:
-    # If the SDK isn't installed yet, raise a helpful message
-    raise RuntimeError(
-        "OpenAI SDK failed to import. Make sure requirements.txt includes "
-        "openai==1.40.0 and redeploy. Underlying error: %r" % (e,)
-    )
-
-# ---------- FastAPI app ----------
 app = FastAPI(title="voya backend", version="1.0.0")
 
 
-# health/docs sanity
+# -------- health/docs --------
 @app.get("/")
 def read_root():
     return {"message": "Hello from FastAPI on Render!"}
 
 
-# ---- (optional) simple ingest you already had ----
+# -------- optional: simple ingest stub you had before --------
 class IngestPayload(BaseModel):
     pdf_url: str
     source: str
 
 
 @app.post("/ingest")
-async def ingest(payload: IngestPayload, x_api_key: Optional[str] = Header(default=None, alias="x-api-key")):
+async def ingest(
+    payload: IngestPayload,
+    x_api_key: Optional[str] = Header(default=None, alias="x-api-key"),
+):
     # simple key check
     expect = VOYA_API_KEY
     if not expect or x_api_key != expect:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-    # fake-accept (keep your real ingest here later)
+    # TODO: your real ingestion/index job here
     return {"status": "accepted", "job_id": "demo", "message": "download + ingestion started"}
 
 
-# ---------- main: student Q&A ----------
+# -------- main: student Q&A (GPT-powered) --------
 @app.post("/answer")
 async def answer(
     # form fields coming from n8n Webhook
-    type: str = Form(...),            # "text" | "image" (we'll handle "text" for MVP)
+    type: str = Form(...),            # "text" | "image" (we'll handle "text" now)
     message: str = Form(...),         # the student's question
     file: UploadFile | None = File(None),  # optional, for later image mode
     x_api_key: Optional[str] = Header(default=None, alias="x-api-key"),
@@ -75,12 +64,18 @@ async def answer(
             }
         )
 
-    # --- Text mode (MVP) ---
+    # Text mode (MVP)
     if type.lower() != "text":
-        raise HTTPException(status_code=422, detail="Bad form data: need type='text' + message (and optional file).")
+        raise HTTPException(
+            status_code=422,
+            detail="Bad form data: need type='text' + message (and optional file).",
+        )
 
     if not OPENAI_API_KEY:
-        raise HTTPException(status_code=500, detail="Server missing OPENAI_API_KEY. Set it in Render → Environment.")
+        raise HTTPException(
+            status_code=500,
+            detail="Server missing OPENAI_API_KEY. Set it in Render → Environment.",
+        )
 
     # Build a structured instruction so the model returns the template you want
     prompt = f"""
@@ -95,43 +90,63 @@ Paper/Variant: {{paper/variant (or Unknown)}}
 Question: {{question number (or Unknown)}}
 
 **Mark Scheme (verbatim key points)**
-- {{bullet}}
-- {{bullet}}
+- {{bullet key point 1}}
+- {{bullet key point 2}}
+- {{bullet key point 3}}
 
 **Why this is the answer (tutor explanation)**
-Explain clearly and concisely based on the syllabus.
+- {{clear, concise explanation aligned to mark scheme}}
+- Explain clearly and concisely based on the syllabus.
 
 **Final Answer**
-One short, direct final line.
+- One short, direct final line.
 
 **Check your work**
 - Marks available: {{number if known}}
 - Typical pitfalls: {{common mistakes}}
 """.strip()
 
+    # --- Call OpenAI (official SDK, no proxies) ---
     try:
-        comp = oai_client.chat.completions.create(
-            model=OPENAI_MODEL,  # e.g., "gpt-5-turbo"
+        from openai import OpenAI  # requires openai==1.40.0
+    except Exception as e:
+        # Helpful import error for missing dependency
+        raise RuntimeError(
+            "OpenAI SDK failed to import. Ensure requirements.txt includes "
+            "'openai==1.40.0' and redeploy. Underlying error: %r" % (e,)
+        )
+
+    client = OpenAI(api_key=OPENAI_API_KEY)
+
+    # Prefer chat.completions for broad compatibility
+    try:
+        completion = client.chat.completions.create(
+            model=OPENAI_MODEL,
             messages=[
-                {"role": "system", "content": "You are a helpful exam tutor. Use the requested sections and no extras."},
+                {"role": "system", "content": "You are a helpful exam tutor. Be accurate and concise."},
                 {"role": "user", "content": prompt},
             ],
             temperature=0.2,
         )
-        gpt_answer = comp.choices[0].message.content
+        gpt_answer = completion.choices[0].message.content
     except Exception as e:
-        # Surface a clean error back to the caller and to logs
-        raise HTTPException(status_code=500, detail=f"OpenAI call failed: {e}")
+        # Bubble up model/auth errors clearly
+        raise HTTPException(status_code=500, detail=f"OpenAI error: {e!r}")
+
+    # Optional: lightweight metadata placeholder (fills your n8n UI nicely)
+    paper_meta = {
+        "exam": "Unknown",
+        "session": "Unknown",
+        "variant": "Unknown",
+        "question": "Unknown",
+    }
 
     return JSONResponse(
         {
-            "received": {"type": "text", "message": message},
-            "paper_meta": {
-                "exam": "Unknown",
-                "session": "Unknown",
-                "variant": "Unknown",
-                "question": "Unknown",
-            },
+            "received": {"type": "text", "message": message, "has_file": False},
+            "paper_meta": paper_meta,
             "template_answer": gpt_answer,
         }
     )
+
+# (No __main__ block for Render; Uvicorn is run by the platform)
