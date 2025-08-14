@@ -72,3 +72,45 @@ async def answer(
 
     # fallback
     raise HTTPException(status_code=422, detail="Bad form data: need type + message (and optional file).")
+# --- Student Q&A endpoint (text MVP) ---
+
+from pydantic import BaseModel  # (you likely already imported this above)
+import os
+from fastapi import Form, Header, HTTPException
+from fastapi.responses import JSONResponse
+
+VOYA_API_KEY = os.getenv("VOYA_API_KEY", "")
+
+@app.post("/answer")
+async def answer(
+    type: str = Form(...),         # "text" for now
+    message: str = Form(...),      # student's question text
+    x_api_key: str | None = Header(None, alias="x-api-key"),
+):
+    # auth
+    if not x_api_key or x_api_key != VOYA_API_KEY:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    # TODO: replace this stub with your real search/index logic.
+    # For now, return a formatted template so n8n can display it.
+    template = (
+        "**Source**\n"
+        "Exam: Cambridge IGCSE Chemistry (0620)\n"
+        "Session: (detected later)\n"
+        "Paper/Variant: (detected later)\n"
+        "Question: (detected later)\n\n"
+        "**Mark Scheme (verbatim key points)**\n(placeholder)\n\n"
+        "**Why this is the answer (tutor explanation)**\n(placeholder)\n\n"
+        "**Final Answer**\n(placeholder)\n\n"
+        "**Check your work**\n- Marks available: (detected later)\n- Typical pitfalls: (placeholder)"
+    )
+
+    return JSONResponse(
+        {
+            "status": "ok",
+            "input_type": type,
+            "question": message,
+            "template_answer": template,
+        }
+    )
+
