@@ -1,77 +1,109 @@
-import os
-from typing import Optional
-from fastapi import FastAPI, Form, File, UploadFile, Header, HTTPException
+# app/main.py
+
+from fastapi import FastAPI, Form, UploadFile, File, Header, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from openai import OpenAI
+import os
 
-# --- App instance ---
+# ---------- FastAPI app ----------
 app = FastAPI()
 
-# --- API Keys ---
-VOYA_API_KEY = os.getenv("VOYA_API_KEY", "")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5-turbo")
+
+# ---------- Sanity/health ----------
+@app.get("/")
+def read_root():
+    return {"message": "Hello from FastAPI on Render!"}
 
 
-# Example ingest endpoint (if you have it already)
+# ---------- Simple ingest (stub you already had) ----------
 class IngestPayload(BaseModel):
-    data: dict
-
+    pdf_url: str
+    source: str
 
 @app.post("/ingest")
-async def ingest(payload: IngestPayload, x_api_key: Optional[str] = Header(default=None, alias="x-api-key")):
-    # Simple auth check
-    if x_api_key != VOYA_API_KEY:
+async def ingest(payload: IngestPayload, x_api_key: str | None = Header(default=None, alias="x-api-key")):
+    expect = os.environ.get("VOYA_API_KEY", "")
+    if not expect or x_api_key != expect:
         raise HTTPException(status_code=401, detail="Unauthorized")
-    return {"status": "ok", "received": payload.dict()}
+    # TODO: your real ingestion/indexing job
+    return {"status": "accepted", "job_id": "demo", "message": "download + ingestion started"}
 
 
-# --- GPT-5 Answer Endpoint ---
+# ---------- Answer (GPT-powered) ----------
 @app.post("/answer")
 async def answer(
-    type: str = Form(...),
-    message: str = Form(...),
-    file: UploadFile | None = File(None),
+    # form fields coming from n8n Webhook
+    type: str = Form(...),            # "text" | "image"  (we’ll handle "text" now)
+    message: str = Form(...),         # student question
+    file: UploadFile | None = File(None),  # optional: future image mode
     x_api_key: str | None = Header(default=None, alias="x-api-key"),
 ):
-    # API key check
-    if x_api_key != VOYA_API_KEY:
+    # API key check (Render env: VOYA_API_KEY)
+    expect = os.environ.get("VOYA_API_KEY", "")
+    if not expect or x_api_key != expect:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-    # If image file uploaded (future handling)
+    # If an image is sent, just acknowledge for now (MVP focuses on text)
     if file is not None and type.lower() == "image":
         return JSONResponse({
             "received": {"type": "image", "message": message, "has_file": True},
-            "template_answer": "(image mode placeholder — OCR to be added)"
+            "template_answer": "(image mode placeholder — wire OCR next)"
         })
 
-    # Text mode — Call GPT-5
-    if type.lower() == "text":
-        client = OpenAI(api_key=OPENAI_API_KEY)
+    # ---- Text mode (MVP) ----
+    # Build a structured instruction so the model returns the template you want
+    openai_model = os.environ.get("OPENAI_MODEL", "gpt-5-turbo")
+    from openai import OpenAI  # official SDK
+    client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
-        prompt = f"""
-        You are an AI tutor. The student asks: {message}.
-        Respond in structured markdown with:
-        **Source** (exam info if available)
-        **Mark Scheme** (verbatim key points)
-        **Why this is the answer** (explanation)
-        """
+    prompt = f"""
+You are an AI tutor. A student asks: {message}
 
-        completion = client.chat.completions.create(
-            model=OPENAI_MODEL,
-            messages=[
-                {"role": "system", "content": "You are a helpful exam tutor."},
-                {"role": "user", "content": prompt},
-            ],
-        )
+Respond ONLY in structured markdown with these sections:
 
-        gpt_answer = completion.choices[0].message.content
+**Source**
+Exam: {{exam (or Unknown)}}
+Session: {{month/season, year (or Unknown)}}
+Paper/Variant: {{paper/variant (or Unknown)}}
+Question: {{question number (or Unknown)}}
 
-        return JSONResponse({
-            "received": {"type": "text", "message": message},
-            "template_answer": gpt_answer
-        })
+**Mark Scheme (verbatim key points)**
+- {{bullet key point 1}}
+- {{bullet key point 2}}
+- {{bullet key point 3}}
 
-    # If type is neither text nor image
-    raise HTTPException(status_code=422, detail="Bad form data: need type + message (and optional file).")
+**Why this is the answer (tutor explanation)**
+- {{clear, concise explanation aligned to mark scheme}}
+
+**Final Answer**
+- {{1–2 line final answer}}
+
+**Check your work**
+- Marks available: {{n}}
+- Typical pitfalls: {{brief pitfalls}}
+""".strip()
+
+    # Call the Responses API (preferred)
+    # Doc: https://platform.openai.com/docs/overview?lang=python
+    resp = client.responses.create(
+        model=openai_model,
+        input=[
+            {"role": "system", "content": "You are a helpful exam tutor. Be accurate and concise."},
+            {"role": "user", "content": prompt},
+        ],
+    )
+
+    # Best-effort text extraction
+    answer_text = getattr(resp, "output_text", None) or str(resp)
+
+    return JSONResponse({
+        "received": {"type": "text", "message": message, "has_file": False},
+        "template_answer": answer_text,
+    })
+
+
+# ---------- Local dev helper ----------
+if __name__ == "__main__":
+    # Local test:  uvicorn app.main:app --reload
+    import uvicorn
+    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)
