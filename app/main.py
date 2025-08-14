@@ -1,93 +1,89 @@
-from fastapi import FastAPI, Header, HTTPException
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel, HttpUrl
-import os, uuid, pathlib, asyncio, httpx
+# app/main.py
+import os
+from fastapi import FastAPI, Form, Header, HTTPException
 
 app = FastAPI()
 
-# ---- API key (set in Render Environment as VOYA_API_KEY) ----
-API_KEY = os.getenv("VOYA_API_KEY", "")
+# --------- simple demo data (add more rows later) ----------
+PAST_PAPERS = [
+    {
+        "exam": "Cambridge IGCSE Chemistry (0620)",
+        "session": "May/Jun, 2021",
+        "paper_variant": "42/2",
+        "question_number": "3(b)(ii)",
+        "question_text": "explain ionic bonding",
+        "keywords": ["ionic bond", "ionic bonding", "explain ionic"],
+        "mark_scheme": (
+            "Ionic bonds form by transfer of electrons from metal to non-metal; "
+            "oppositely charged ions are produced and held by strong electrostatic attraction."
+        ),
+        "explanation": (
+            "The MS wants the two parts: electron transfer AND attraction between ions. "
+            "Use words like 'electrostatic attraction' and 'oppositely charged ions'."
+        ),
+        "final_answer": (
+            "Electron(s) transfer from the metal to the non‑metal to form ions; "
+            "ions are held by strong electrostatic attraction."
+        ),
+        "marks": 3,
+        "pitfalls": "Saying 'share electrons' (that’s covalent) or forgetting to mention ions/attraction."
+    },
+    # add more items later
+]
 
-def require_api_key(x_api_key: str | None):
-    if API_KEY and x_api_key != API_KEY:
-        raise HTTPException(status_code=401, detail="Invalid API key")
+def find_match(user_q: str):
+    q = user_q.lower().strip()
+    for row in PAST_PAPERS:
+        if any(k in q for k in row["keywords"]):
+            return row
+    return None
 
-# ---- Model for JSON body ----
-class IngestByUrl(BaseModel):
-    pdf_url: HttpUrl
-    source: str | None = None
+def fill_template(d: dict) -> str:
+    if not d:
+        return (
+            "I couldn't find this question yet. "
+            "Try rephrasing or add it to the dataset."
+        )
+    return f"""**Source**
+Exam: {d['exam']}
+Session: {d['session']}
+Paper/Variant: {d['paper_variant']}
+Question: {d['question_number']}
 
-# ---- Helpers ----
-async def download_pdf(pdf_url: str, dest_path: str):
-    timeout = httpx.Timeout(60.0, connect=30.0)
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-        async with client.stream("GET", pdf_url) as r:
-            r.raise_for_status()
-            with open(dest_path, "wb") as f:
-                async for chunk in r.aiter_bytes():
-                    f.write(chunk)
+**Mark Scheme (verbatim key points)**
+{d['mark_scheme']}
 
-async def process_ingestion(local_path: str):
-    # Stub: replace with OCR + segmentation later
-    await asyncio.sleep(1.0)
-    size = os.path.getsize(local_path)
-    print(f"[INGEST] saved file: {local_path}, bytes={size}")
-    return {"status": "ok", "bytes": size}
+**Why this is the answer (tutor explanation)**
+{d['explanation']}
 
-# ---- Routes ----
+**Final Answer**
+{d['final_answer']}
+
+**Check your work**
+Marks available: {d['marks']}
+Typical pitfalls: {d['pitfalls']}
+"""
+
+# --------- security helper ----------
+def ensure_api_key(x_api_key: str | None):
+    expected = os.getenv("VOYA_API_KEY")
+    if not expected or x_api_key != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+# --------- endpoints ----------
 @app.get("/")
 def read_root():
-    return {"message": "Hello from FastAPI on Render!"}
-
-@app.post("/ingest")
-async def ingest(body: IngestByUrl, x_api_key: str | None = Header(default=None)):
-    require_api_key(x_api_key)
-
-    job_id = str(uuid.uuid4())
-    temp_dir = pathlib.Path("/tmp/ingest")
-    temp_dir.mkdir(parents=True, exist_ok=True)
-    dest = temp_dir / f"{job_id}.pdf"
-
-    async def _job():
-        try:
-            await download_pdf(str(body.pdf_url), str(dest))
-            await process_ingestion(str(dest))
-            # os.remove(dest)  # optional
-        except Exception as e:
-            print(f"[INGEST ERROR] {e}")
-
-    asyncio.create_task(_job())
-    return JSONResponse({"status": "accepted", "job_id": job_id, "message": "download + ingestion started"})
-
-from fastapi import UploadFile, File, Form
+    return {"ok": True}
 
 @app.post("/answer")
 async def answer(
-    x_api_key: str | None = Header(default=None),
-    type: str = Form(...),                    # "text" or "image"
-    message: str = Form(""),                  # the student's question (for text); optional with image
-    student_id: str = Form(default=""),
-    file: UploadFile = File(default=None),    # image if provided
+    type: str = Form("text"),
+    message: str = Form(...),
+    x_api_key: str | None = Header(None, convert_underscores=False),
 ):
-    require_api_key(x_api_key)
+    ensure_api_key(x_api_key)
+    if type != "text":
+        return {"template_answer": "Images not enabled in MVP. Send text only."}
 
-    # --- TODO: replace with real retrieval over your ingested data ---
-    # For now, return a fixed, correctly formatted template so wiring works.
-    template = (
-        "1) **Source**\n"
-        "- Exam: Cambridge IGCSE Chemistry (0620)\n"
-        "- Session: May/Jun, 2021\n"
-        "- Paper/Variant: 42/2\n"
-        "- Question: 3(b)(ii)\n\n"
-        "2) **Mark Scheme (verbatim key points)**\n"
-        "- (placeholder)\n\n"
-        "3) **Why this is the answer (tutor explanation)**\n"
-        "- (placeholder)\n\n"
-        "4) **Final Answer**\n"
-        "- (placeholder)\n\n"
-        "5) **Check your work**\n"
-        "- Marks available: 3\n"
-        "- Typical pitfalls: (placeholder)\n"
-    )
-    return {"template_answer": template, "received": {"type": type, "has_file": bool(file), "message": message}}
-
+    match = find_match(message)
+    return {"template_answer": fill_template(match)}
