@@ -58,3 +58,36 @@ async def ingest(body: IngestByUrl, x_api_key: str | None = Header(default=None)
 
     asyncio.create_task(_job())
     return JSONResponse({"status": "accepted", "job_id": job_id, "message": "download + ingestion started"})
+
+from fastapi import UploadFile, File, Form
+
+@app.post("/answer")
+async def answer(
+    x_api_key: str | None = Header(default=None),
+    type: str = Form(...),                    # "text" or "image"
+    message: str = Form(""),                  # the student's question (for text); optional with image
+    student_id: str = Form(default=""),
+    file: UploadFile = File(default=None),    # image if provided
+):
+    require_api_key(x_api_key)
+
+    # --- TODO: replace with real retrieval over your ingested data ---
+    # For now, return a fixed, correctly formatted template so wiring works.
+    template = (
+        "1) **Source**\n"
+        "- Exam: Cambridge IGCSE Chemistry (0620)\n"
+        "- Session: May/Jun, 2021\n"
+        "- Paper/Variant: 42/2\n"
+        "- Question: 3(b)(ii)\n\n"
+        "2) **Mark Scheme (verbatim key points)**\n"
+        "- (placeholder)\n\n"
+        "3) **Why this is the answer (tutor explanation)**\n"
+        "- (placeholder)\n\n"
+        "4) **Final Answer**\n"
+        "- (placeholder)\n\n"
+        "5) **Check your work**\n"
+        "- Marks available: 3\n"
+        "- Typical pitfalls: (placeholder)\n"
+    )
+    return {"template_answer": template, "received": {"type": type, "has_file": bool(file), "message": message}}
+
