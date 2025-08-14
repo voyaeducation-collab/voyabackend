@@ -29,10 +29,9 @@ async def ingest(payload: IngestPayload, x_api_key: str | None = Header(default=
 # --- NEW: MVP /answer ---
 @app.post("/answer")
 async def answer(
-    # form fields coming from n8n Webhook
-    type: str = Form(...),                 # "text" | "image" (for now we’ll handle "text")
-    message: str = Form(...),              # the student’s question
-    file: UploadFile | None = File(None),  # optional, for later image mode
+    type: str = Form(...),
+    message: str = Form(...),
+    file: UploadFile | None = File(None),
     x_api_key: str | None = Header(default=None, alias="x-api-key"),
 ):
     # API key check
@@ -40,36 +39,34 @@ async def answer(
     if not expect or x_api_key != expect:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-    # --- MVP logic (text only) ---
-    # Here you’d call your retrieval/search. For now, return a realistic-shaped payload.
+    # Call GPT-5 for text messages
     if type.lower() == "text":
-        # TODO: replace this block with your real search over ingested data
-        template_answer = (
-            "**Source**\n"
-            "Exam: Cambridge IGCSE Chemistry (0620)\n"
-            "Session: May/Jun, 2021\n"
-            "Paper/Variant: 42\n"
-            "Question: 3(b)(ii)\n\n"
-            "**Mark Scheme (verbatim key points)**\n"
-            "• ionic bond is electrostatic attraction between oppositely charged ions\n"
-            "• formed by electron transfer from metal to non‑metal\n\n"
-            "**Why this is the answer (tutor explanation)**\n"
-            "When sodium reacts with chlorine, Na loses an electron (Na⁺) and Cl gains it (Cl⁻), "
-            "so the attraction between Na⁺ and Cl⁻ is the ionic bond.\n\n"
-            "**Final Answer**\n"
-            "Ionic bonding is the electrostatic attraction between positive and negative ions formed by electron transfer.\n\n"
-            "**Check your work**\n"
-            "Marks available: 3\n"
-            "Typical pitfalls: saying 'sharing' (that’s covalent), not mentioning electrostatic attraction."
+        from openai import OpenAI
+        client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+
+        prompt = f"""You are an AI tutor. The student asks: {message}.
+Respond in structured markdown with:
+- **Source** (exam info if available)
+- **Mark Scheme** (verbatim key points)
+- **Why this is the answer** (explanation)."""
+
+        completion = client.chat.completions.create(
+            model=os.environ.get("OPENAI_MODEL", "gpt-5-turbo"),
+            messages=[
+                {"role": "system", "content": "You are a helpful exam tutor."},
+                {"role": "user", "content": prompt},
+            ],
         )
-        return JSONResponse({"received": {"type": "text", "message": message, "has_file": False},
-                             "template_answer": template_answer})
 
-    # image branch (placeholder until you wire OCR)
+        gpt_answer = completion.choices[0].message.content
+        return JSONResponse({"received": {"type": "text", "message": message}, "template_answer": gpt_answer})
+
+    # Placeholder for image handling
     if file is not None:
-        return JSONResponse({"received": {"type": "image", "message": message, "has_file": True},
-                             "template_answer": "(image mode placeholder — wire OCR next)"})
+        return JSONResponse({"received": {"type": "image", "message": message, "has_file": True}, "template_answer": "(image mode placeholder)"})
 
+    raise HTTPException(status_code=422, detail="Bad form data: need type + message (and optional file).")
+    
     # fallback
     raise HTTPException(status_code=422, detail="Bad form data: need type + message (and optional file).")
 # --- Student Q&A endpoint (text MVP) ---
