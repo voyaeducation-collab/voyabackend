@@ -54,8 +54,7 @@ async def answer(
     # Build a structured instruction so the model returns the template you want
     openai_model = os.environ.get("OPENAI_MODEL", "gpt-5-turbo")
     from openai import OpenAI  # official SDK
-    client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
-
+client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
     prompt = f"""
 You are an AI tutor. A student asks: {message}
 
