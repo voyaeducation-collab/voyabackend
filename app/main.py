@@ -1,52 +1,46 @@
 # app/main.py
-
 from typing import Optional
 import os
+import json
 
-from fastapi import FastAPI, Form, File, UploadFile, Header, HTTPException
+from fastapi import FastAPI, Form, UploadFile, File, Header, HTTPException
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+import httpx
 
-# -------- env & config --------
-VOYA_API_KEY: str = os.environ.get("VOYA_API_KEY", "")
-OPENAI_API_KEY: str = os.environ.get("OPENAI_API_KEY", "")
-OPENAI_MODEL: str = os.environ.get("OPENAI_MODEL", "gpt-5-turbo")
+# ------------- Config (from environment) -------------
+VOYA_API_KEY = os.environ.get("VOYA_API_KEY", "")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-5-turbo")  # or "gpt-5"
 
+# ------------- FastAPI app -------------
 app = FastAPI(title="voya backend", version="1.0.0")
 
-
-# -------- health/docs --------
+# Health/docs sanity
 @app.get("/")
 def read_root():
     return {"message": "Hello from FastAPI on Render!"}
 
-
-# -------- optional: simple ingest stub you had before --------
+# (optional) simple ingest stub you already had
+from pydantic import BaseModel
 class IngestPayload(BaseModel):
     pdf_url: str
     source: str
 
-
 @app.post("/ingest")
-async def ingest(
-    payload: IngestPayload,
-    x_api_key: Optional[str] = Header(default=None, alias="x-api-key"),
-):
+async def ingest(payload: IngestPayload, x_api_key: Optional[str] = Header(default=None, alias="x-api-key")):
     # simple key check
     expect = VOYA_API_KEY
     if not expect or x_api_key != expect:
         raise HTTPException(status_code=401, detail="Unauthorized")
-
-    # TODO: your real ingestion/index job here
+    # fake-accept (keep your real ingest here later)
     return {"status": "accepted", "job_id": "demo", "message": "download + ingestion started"}
 
-
-# -------- main: student Q&A (GPT-powered) --------
+# ------------- main: student Q&A (OpenAI via httpx) -------------
 @app.post("/answer")
 async def answer(
     # form fields coming from n8n Webhook
-    type: str = Form(...),            # "text" | "image" (we'll handle "text" now)
-    message: str = Form(...),         # the student's question
+    type: str = Form(...),         # "text" | "image" (we'll handle "text" now)
+    message: str = Form(...),      # the student's question
     file: UploadFile | None = File(None),  # optional, for later image mode
     x_api_key: Optional[str] = Header(default=None, alias="x-api-key"),
 ):
@@ -64,7 +58,7 @@ async def answer(
             }
         )
 
-    # Text mode (MVP)
+    # ---- Text mode (MVP) ----
     if type.lower() != "text":
         raise HTTPException(
             status_code=422,
@@ -74,7 +68,7 @@ async def answer(
     if not OPENAI_API_KEY:
         raise HTTPException(
             status_code=500,
-            detail="Server missing OPENAI_API_KEY. Set it in Render → Environment.",
+            detail="Server missing OPENAI_API_KEY. Set it in Render -> Environment.",
         )
 
     # Build a structured instruction so the model returns the template you want
@@ -93,9 +87,10 @@ Question: {{question number (or Unknown)}}
 - {{bullet key point 1}}
 - {{bullet key point 2}}
 - {{bullet key point 3}}
+- {{bullet}}
+- {{bullet}}
 
 **Why this is the answer (tutor explanation)**
-- {{clear, concise explanation aligned to mark scheme}}
 - Explain clearly and concisely based on the syllabus.
 
 **Final Answer**
@@ -106,34 +101,61 @@ Question: {{question number (or Unknown)}}
 - Typical pitfalls: {{common mistakes}}
 """.strip()
 
-    # --- Call OpenAI (official SDK, no proxies) ---
+    # Call OpenAI via raw HTTP (no SDK)
+    headers = {
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    body = {
+        "model": OPENAI_MODEL,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "You are a helpful exam tutor. Reply ONLY in the exact structured "
+                    "markdown template requested by the user."
+                ),
+            },
+            {"role": "user", "content": prompt},
+        ],
+        # Keep responses shortish and deterministic for MVP; tweak if you like.
+        "temperature": 0.2,
+        "max_tokens": 600,
+    }
+
     try:
-        from openai import OpenAI  # requires openai==1.40.0
+        async with httpx.AsyncClient(timeout=40) as client:
+            r = await client.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers=headers,
+                json=body,
+            )
+        if r.status_code != 200:
+            # Bubble useful error detail back (without leaking secrets)
+            try:
+                err = r.json()
+            except Exception:
+                err = {"message": r.text}
+            return JSONResponse(
+                {
+                    "error": "openai_api_error",
+                    "status": r.status_code,
+                    "detail": err,
+                },
+                status_code=502,
+            )
+        data = r.json()
+        gpt_answer = data["choices"][0]["message"]["content"]
+
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=504, detail="Upstream model timeout")
     except Exception as e:
-        # Helpful import error for missing dependency
-        raise RuntimeError(
-            "OpenAI SDK failed to import. Ensure requirements.txt includes "
-            "'openai==1.40.0' and redeploy. Underlying error: %r" % (e,)
+        # Catch-all (network/parse issues)
+        return JSONResponse(
+            {"error": "server_error", "detail": str(e)}, status_code=500
         )
 
-    client = OpenAI(api_key=OPENAI_API_KEY)
-
-    # Prefer chat.completions for broad compatibility
-    try:
-        completion = client.chat.completions.create(
-            model=OPENAI_MODEL,
-            messages=[
-                {"role": "system", "content": "You are a helpful exam tutor. Be accurate and concise."},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.2,
-        )
-        gpt_answer = completion.choices[0].message.content
-    except Exception as e:
-        # Bubble up model/auth errors clearly
-        raise HTTPException(status_code=500, detail=f"OpenAI error: {e!r}")
-
-    # Optional: lightweight metadata placeholder (fills your n8n UI nicely)
+    # Minimal meta stub (fill in later when you wire retrieval)
     paper_meta = {
         "exam": "Unknown",
         "session": "Unknown",
@@ -148,5 +170,3 @@ Question: {{question number (or Unknown)}}
             "template_answer": gpt_answer,
         }
     )
-
-# (No __main__ block for Render; Uvicorn is run by the platform)
